@@ -1,16 +1,10 @@
 <?php
 /**
- * BOTMOTHER - To'liq Telegram Bot ichida ishlaydigan Bot Konstruktori + Statistika
- * - index.php (Asosiy Konstruktor Bot + Avto-papka yaratish + Webhook o'rnatish + Jonli Statistika)
- * - insta/index.php (Turbo Instagram yuklovchi bot)
- * - youtube/index.php (Turbo YouTube yuklovchi bot)
- * - kino/index.php (Admin panelli Kino bot)
- * - users/{user_id}/ (Foydalanuvchilar ID, kirish-chiqishlar soni va botlari bazasi)
+ * BOTMOTHER - Konstruktor Bot + Admin Panel + Faqat Admin Statistika
  */
 
 date_default_timezone_set('Asia/Tashkent');
 
-// 1. KERAKLI PAPKALAR VA SHABLONLARNI AVTOMATIK YARATISH
 $baseDir = __DIR__;
 $folders = ['insta', 'youtube', 'kino', 'users'];
 
@@ -20,8 +14,11 @@ foreach ($folders as $folder) {
     }
 }
 
+$masterToken = $_GET['token'] ?? getenv('BOT_TOKEN') ?: 'BU_YERGA_ASOSIY_BOT_TOKENINI_YOZING';
+$adminId = getenv('ADMIN_ID') ?: 'SIZNING_TELEGRAM_ID';
+
 // =========================================================================
-// SHABLON 1: INSTAGRAM BOT (insta/index.php) - MAKSIMAL TEZLIK
+// SHABLON 1: INSTAGRAM BOT (insta/index.php)
 // =========================================================================
 $instaTemplate = <<<'PHP'
 <?php
@@ -38,7 +35,7 @@ function sendTg($token, $method, $data) {
     $ch = curl_init("https://api.telegram.org/bot{$token}/{$method}");
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 60);
     $res = curl_exec($ch);
     curl_close($ch);
     return json_decode($res, true);
@@ -47,25 +44,28 @@ function sendTg($token, $method, $data) {
 if ($text === '/start') {
     sendTg($token, 'sendMessage', [
         'chat_id' => $chatId,
-        'text' => "⚡ <b>Turbo Instagram Bot!</b>\n\n📥 Reels yoki Video havolasini yuboring — 3 soniyaga bormay yuklab beraman:",
+        'text' => "⚡ <b>Turbo Instagram Bot!</b>\n\n📥 Reels yoki Video havolasini yuboring:",
         'parse_mode' => 'HTML'
     ]);
 } elseif (filter_var($text, FILTER_VALIDATE_URL) && strpos($text, 'instagram.com') !== false) {
     $startTime = microtime(true);
-
-    sendTg($token, 'sendChatAction', [
-        'chat_id' => $chatId,
-        'action' => 'upload_video'
-    ]);
+    sendTg($token, 'sendChatAction', ['chat_id' => $chatId, 'action' => 'upload_video']);
 
     $safeUrl = escapeshellarg($text);
-    $cmd = "yt-dlp --no-warnings --no-playlist -f 'best[ext=mp4]/best' -g {$safeUrl} 2>/dev/null";
-    $directUrl = trim(shell_exec($cmd));
-    $lines = explode("\n", $directUrl);
-    $videoUrl = trim($lines[0] ?? '');
+    $cmd = "yt-dlp --no-warnings --no-playlist -f 'best[ext=mp4]/best' -g {$safeUrl} 2>&1";
+    $rawOut = trim((string)shell_exec($cmd));
+    $lines = preg_split('/\r\n|\r|\n/', $rawOut);
+    $videoUrl = '';
+    foreach ($lines as $line) {
+        $line = trim($line);
+        if (filter_var($line, FILTER_VALIDATE_URL)) {
+            $videoUrl = $line;
+            break;
+        }
+    }
 
     $sent = false;
-    if (!empty($videoUrl) && filter_var($videoUrl, FILTER_VALIDATE_URL)) {
+    if (!empty($videoUrl)) {
         $elapsed = round(microtime(true) - $startTime, 2);
         $res = sendTg($token, 'sendVideo', [
             'chat_id' => $chatId,
@@ -73,32 +73,31 @@ if ($text === '/start') {
             'caption' => "⚡ <b>{$elapsed} soniyada</b> yuklandi!",
             'parse_mode' => 'HTML'
         ]);
-        if ($res['ok'] ?? false) {
-            $sent = true;
-        }
+        if ($res['ok'] ?? false) $sent = true;
     }
 
     if (!$sent) {
         $tmpFile = sys_get_temp_dir() . '/ig_' . uniqid() . '.mp4';
-        shell_exec("yt-dlp --no-warnings -f 'best[ext=mp4]/best' -o " . escapeshellarg($tmpFile) . " {$safeUrl} 2>/dev/null");
+        $dlOut = trim((string)shell_exec("yt-dlp --no-warnings --no-playlist -f 'best[ext=mp4]/best' -o " . escapeshellarg($tmpFile) . " {$safeUrl} 2>&1"));
         if (file_exists($tmpFile) && filesize($tmpFile) > 0) {
             $elapsed = round(microtime(true) - $startTime, 2);
-            sendTg($token, 'sendVideo', [
+            $res = sendTg($token, 'sendVideo', [
                 'chat_id' => $chatId,
                 'video' => new CURLFile($tmpFile),
                 'caption' => "⚡ <b>{$elapsed} soniyada</b> yuklandi!",
                 'parse_mode' => 'HTML'
             ]);
             @unlink($tmpFile);
-            $sent = true;
+            if ($res['ok'] ?? false) $sent = true;
         }
-    }
-
-    if (!$sent) {
-        sendTg($token, 'sendMessage', [
-            'chat_id' => $chatId,
-            'text' => "❌ Videoni yuklab bo'lmadi. Profil yopiq bo'lishi yoki havola noto'g'ri bo'lishi mumkin."
-        ]);
+        if (!$sent) {
+            $errMsg = mb_substr(strip_tags($dlOut ?: $rawOut), 0, 300);
+            sendTg($token, 'sendMessage', [
+                'chat_id' => $chatId,
+                'text' => "❌ Instagram videoni yuklab bo'lmadi.\nSabab: <code>" . htmlspecialchars($errMsg) . "</code>",
+                'parse_mode' => 'HTML'
+            ]);
+        }
     }
 } elseif ($chatId) {
     sendTg($token, 'sendMessage', [
@@ -110,7 +109,7 @@ PHP;
 file_put_contents("$baseDir/insta/index.php", $instaTemplate);
 
 // =========================================================================
-// SHABLON 2: YOUTUBE BOT (youtube/index.php) - MAKSIMAL TEZLIK
+// SHABLON 2: YOUTUBE BOT (youtube/index.php)
 // =========================================================================
 $youtubeTemplate = <<<'PHP'
 <?php
@@ -127,7 +126,7 @@ function sendTg($token, $method, $data) {
     $ch = curl_init("https://api.telegram.org/bot{$token}/{$method}");
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 60);
     $res = curl_exec($ch);
     curl_close($ch);
     return json_decode($res, true);
@@ -136,25 +135,28 @@ function sendTg($token, $method, $data) {
 if ($text === '/start') {
     sendTg($token, 'sendMessage', [
         'chat_id' => $chatId,
-        'text' => "⚡ <b>Turbo YouTube Bot!</b>\n\n🎬 YouTube Video yoki Shorts havolasini yuboring — chaqmoq tezligida yuklab beraman:",
+        'text' => "⚡ <b>Turbo YouTube Bot!</b>\n\n🎬 YouTube Video yoki Shorts havolasini yuboring:",
         'parse_mode' => 'HTML'
     ]);
 } elseif (filter_var($text, FILTER_VALIDATE_URL) && (strpos($text, 'youtube.com') !== false || strpos($text, 'youtu.be') !== false)) {
     $startTime = microtime(true);
-
-    sendTg($token, 'sendChatAction', [
-        'chat_id' => $chatId,
-        'action' => 'upload_video'
-    ]);
+    sendTg($token, 'sendChatAction', ['chat_id' => $chatId, 'action' => 'upload_video']);
 
     $safeUrl = escapeshellarg($text);
-    $cmd = "yt-dlp --no-warnings --no-playlist -f 'best[ext=mp4][acodec!=none][vcodec!=none]/18/best' -g {$safeUrl} 2>/dev/null";
-    $directUrl = trim(shell_exec($cmd));
-    $lines = explode("\n", $directUrl);
-    $videoUrl = trim($lines[0] ?? '');
+    $cmd = "yt-dlp --no-warnings --no-playlist --extractor-args 'youtube:player_client=android,web_safari' -f 'best[ext=mp4][acodec!=none][vcodec!=none]/best[ext=mp4]/18/best' -g {$safeUrl} 2>&1";
+    $rawOut = trim((string)shell_exec($cmd));
+    $lines = preg_split('/\r\n|\r|\n/', $rawOut);
+    $videoUrl = '';
+    foreach ($lines as $line) {
+        $line = trim($line);
+        if (filter_var($line, FILTER_VALIDATE_URL)) {
+            $videoUrl = $line;
+            break;
+        }
+    }
 
     $sent = false;
-    if (!empty($videoUrl) && filter_var($videoUrl, FILTER_VALIDATE_URL)) {
+    if (!empty($videoUrl)) {
         $elapsed = round(microtime(true) - $startTime, 2);
         $res = sendTg($token, 'sendVideo', [
             'chat_id' => $chatId,
@@ -162,32 +164,31 @@ if ($text === '/start') {
             'caption' => "⚡ <b>{$elapsed} soniyada</b> yuklandi!",
             'parse_mode' => 'HTML'
         ]);
-        if ($res['ok'] ?? false) {
-            $sent = true;
-        }
+        if ($res['ok'] ?? false) $sent = true;
     }
 
     if (!$sent) {
         $tmpFile = sys_get_temp_dir() . '/yt_' . uniqid() . '.mp4';
-        shell_exec("yt-dlp --no-warnings --no-playlist -f 'best[ext=mp4][filesize<48M]/18' -o " . escapeshellarg($tmpFile) . " {$safeUrl} 2>/dev/null");
+        $dlOut = trim((string)shell_exec("yt-dlp --no-warnings --no-playlist --extractor-args 'youtube:player_client=android,web_safari' -f 'best[ext=mp4][filesize<48M]/18' -o " . escapeshellarg($tmpFile) . " {$safeUrl} 2>&1"));
         if (file_exists($tmpFile) && filesize($tmpFile) > 0) {
             $elapsed = round(microtime(true) - $startTime, 2);
-            sendTg($token, 'sendVideo', [
+            $res = sendTg($token, 'sendVideo', [
                 'chat_id' => $chatId,
                 'video' => new CURLFile($tmpFile),
                 'caption' => "⚡ <b>{$elapsed} soniyada</b> yuklandi!",
                 'parse_mode' => 'HTML'
             ]);
             @unlink($tmpFile);
-            $sent = true;
+            if ($res['ok'] ?? false) $sent = true;
         }
-    }
-
-    if (!$sent) {
-        sendTg($token, 'sendMessage', [
-            'chat_id' => $chatId,
-            'text' => "❌ Videoni yuklab bo'lmadi (video juda katta yoki yopiq bo'lishi mumkin)."
-        ]);
+        if (!$sent) {
+            $errMsg = mb_substr(strip_tags($dlOut ?: $rawOut), 0, 300);
+            sendTg($token, 'sendMessage', [
+                'chat_id' => $chatId,
+                'text' => "❌ YouTube videoni yuklab bo'lmadi.\nSabab: <code>" . htmlspecialchars($errMsg) . "</code>",
+                'parse_mode' => 'HTML'
+            ]);
+        }
     }
 } elseif ($chatId) {
     sendTg($token, 'sendMessage', [
@@ -336,8 +337,12 @@ PHP;
 file_put_contents("$baseDir/kino/index.php", $kinoTemplate);
 
 // =========================================================================
-// YORDAMCHI FUNKSIYA: BARCHA FOYDALANUVCHILAR STATISTIKASINI YIG'ISH
+// YORDAMCHI FUNKSIYALAR
 // =========================================================================
+function isSuperAdmin($userId, $adminId) {
+    return !empty($adminId) && (string)$userId === (string)$adminId;
+}
+
 function getAllStats($baseDir) {
     $userDirs = glob("$baseDir/users/*", GLOB_ONLYDIR);
     $users = [];
@@ -360,7 +365,6 @@ function getAllStats($baseDir) {
         }
     }
 
-    // Oxirgi faol foydalanuvchilarni tepaga chiqarish
     usort($users, function($a, $b) {
         return strtotime($b['last_active'] ?? '2000-01-01') - strtotime($a['last_active'] ?? '2000-01-01');
     });
@@ -375,61 +379,49 @@ function getAllStats($baseDir) {
     ];
 }
 
-// =========================================================================
-// 2. ASOSIY KONSTRUKTOR BOT LOGIKASI (index.php)
-// =========================================================================
-$masterToken = $_GET['token'] ?? getenv('BOT_TOKEN') ?: '8955043733:AAEc2nNY7wjNvjb-YKzZ5n602P8ZLADzq_4';
+function bot($token, $method, $data = []) {
+    $ch = curl_init("https://api.telegram.org/bot{$token}/{$method}");
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+    $res = curl_exec($ch);
+    curl_close($ch);
+    return json_decode($res, true);
+}
+
+function buildMainMenu($isAdmin) {
+    $rows = [
+        [['text' => '📸 Instagram Bot'], ['text' => '🎬 YouTube Bot']],
+        [['text' => '🎥 Kino Bot (+Admin)'], ['text' => '🤖 Mening botlarim']]
+    ];
+    if ($isAdmin) {
+        $rows[] = [['text' => '🛠 Admin Panel'], ['text' => '📊 Statistika']];
+    }
+    return json_encode([
+        'keyboard' => $rows,
+        'resize_keyboard' => true
+    ]);
+}
+
+$adminPanelMenu = json_encode([
+    'keyboard' => [
+        [['text' => '📊 Statistika'], ['text' => '📢 Xabar yuborish']],
+        [['text' => '🔍 User ID qidirish'], ['text' => '🔙 Asosiy menyu']]
+    ],
+    'resize_keyboard' => true
+]);
 
 $rawInput = file_get_contents('php://input');
 
-// BRAUZER YOKI UPTIMEROBOT KIRGANDA JONLI STATISTIKA PANELINI KO'RSATISH
 if (empty($rawInput)) {
     $stats = getAllStats($baseDir);
-    header('Content-Type: text/html; charset=utf-8');
-    echo "<!DOCTYPE html><html lang='uz'><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>Botmother Statistika</title>
-    <style>
-        body { font-family: sans-serif; background: #0f172a; color: #f8fafc; padding: 20px; }
-        .cards { display: flex; gap: 15px; flex-wrap: wrap; margin-bottom: 25px; }
-        .card { background: #1e293b; padding: 15px 20px; border-radius: 10px; border: 1px solid #334155; min-width: 150px; }
-        .card h3 { margin: 0; font-size: 13px; color: #94a3b8; }
-        .card p { margin: 8px 0 0; font-size: 24px; font-weight: bold; color: #38bdf8; }
-        table { width: 100%; border-collapse: collapse; background: #1e293b; border-radius: 10px; overflow: hidden; }
-        th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #334155; font-size: 14px; }
-        th { background: #334155; color: #e2e8f0; }
-        .badge-active { background: #166534; color: #bbf7d0; padding: 3px 8px; border-radius: 6px; font-size: 12px; }
-        .badge-left { background: #991b1b; color: #fecaca; padding: 3px 8px; border-radius: 6px; font-size: 12px; }
-    </style></head><body>
-    <h2>📊 Botmother — Jonli Monitoring Paneli</h2>
-    <div class='cards'>
-        <div class='card'><h3>👥 Jami foydalanuvchilar</h3><p>{$stats['total_users']} ta</p></div>
-        <div class='card'><h3>🟢 Faol (ichkarida)</h3><p>{$stats['active_users']} ta</p></div>
-        <div class='card'><h3>🔴 Chiqib ketgan (Block)</h3><p>{$stats['left_users']} ta</p></div>
-        <div class='card'><h3>🔄 Jami kirishlar</h3><p>{$stats['total_visits']} marta</p></div>
-        <div class='card'><h3>🤖 Yaratilgan botlar</h3><p>{$stats['total_bots']} ta</p></div>
-    </div>
-    <table>
-        <tr><th>#</th><th>Telegram ID</th><th>Ism va Username</th><th>Holati</th><th>Kirishlar</th><th>Botlari</th><th>Oxirgi faollik</th></tr>";
-    foreach ($stats['users'] as $idx => $u) {
-        $n = $idx + 1;
-        $uid = htmlspecialchars($u['id']);
-        $fname = htmlspecialchars($u['first_name'] ?? '');
-        $uname = !empty($u['username']) ? '@' . htmlspecialchars($u['username']) : '—';
-        $visits = $u['visits_count'] ?? 1;
-        $botsCount = count($u['bots'] ?? []);
-        $last = htmlspecialchars($u['last_active'] ?? '');
-        $statusHtml = (($u['status'] ?? 'active') === 'left')
-            ? "<span class='badge-left'>Chiqib ketgan</span>"
-            : "<span class='badge-active'>Faol</span>";
-        echo "<tr><td>{$n}</td><td><b>{$uid}</b></td><td>{$fname} ({$uname})</td><td>{$statusHtml}</td><td>{$visits} marta</td><td>{$botsCount} ta</td><td>{$last}</td></tr>";
-    }
-    echo "</table></body></html>";
+    header('Content-Type: text/plain; charset=utf-8');
+    echo "Botmother OK | Active users: {$stats['active_users']} | Bots: {$stats['total_bots']}";
     exit;
 }
 
 $update = json_decode($rawInput, true);
 if (!$update) exit;
 
-// FOYDALANUVCHI BOTDAN CHIQIB KETGANINI (BLOCK) YOKI QAYTA KIRGANINI QAYD QILISH
 if (isset($update['my_chat_member'])) {
     $member = $update['my_chat_member'];
     $uId = $member['from']['id'] ?? null;
@@ -466,17 +458,9 @@ $userId = $msg['from']['id'];
 $firstName = $msg['from']['first_name'] ?? 'Foydalanuvchi';
 $username = $msg['from']['username'] ?? '';
 $text = trim($msg['text'] ?? '');
+$isAdmin = isSuperAdmin($userId, $adminId);
+$mainMenu = buildMainMenu($isAdmin);
 
-function bot($token, $method, $data = []) {
-    $ch = curl_init("https://api.telegram.org/bot{$token}/{$method}");
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
-    $res = curl_exec($ch);
-    curl_close($ch);
-    return json_decode($res, true);
-}
-
-// Foydalanuvchini users/{user_id}/ papkasiga saqlash va kirish-chiqishlarini hisoblash
 $userDir = "$baseDir/users/$userId";
 if (!is_dir($userDir)) {
     mkdir($userDir, 0777, true);
@@ -501,21 +485,10 @@ $userData['username'] = $username;
 $userData['status'] = 'active';
 $userData['last_active'] = date('Y-m-d H:i:s');
 
-// Har safar /start bosganda yoki yangi kirganda kirishlar sonini oshirish
 if ($text === '/start' || $isNewUser) {
     $userData['visits_count'] = ($userData['visits_count'] ?? 0) + 1;
 }
 file_put_contents($userFile, json_encode($userData, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
-
-// Asosiy menyu tugmalari (Statistika tugmasi bilan)
-$mainMenu = json_encode([
-    'keyboard' => [
-        [['text' => '📸 Instagram Bot'], ['text' => '🎬 YouTube Bot']],
-        [['text' => '🎥 Kino Bot (+Admin)'], ['text' => '🤖 Mening botlarim']],
-        [['text' => '📊 Statistika']]
-    ],
-    'resize_keyboard' => true
-]);
 
 $cancelMenu = json_encode([
     'keyboard' => [
@@ -524,8 +497,7 @@ $cancelMenu = json_encode([
     'resize_keyboard' => true
 ]);
 
-// /start yoki Bekor qilish
-if ($text === '/start' || $text === '🔙 Bekor qilish') {
+if ($text === '/start' || $text === '🔙 Bekor qilish' || $text === '🔙 Asosiy menyu') {
     $userData['step'] = 'menu';
     $userData['selected_type'] = '';
     file_put_contents($userFile, json_encode($userData, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
@@ -539,21 +511,29 @@ if ($text === '/start' || $text === '🔙 Bekor qilish') {
     exit;
 }
 
-// STATISTIKA BO'LIMI (Kim foydalangani, IDlari, kirib-chiqqanlar soni)
+// FAQAT ADMIN UCHUN STATISTIKA
 if ($text === '📊 Statistika' || $text === '/stats') {
+    if (!$isAdmin) {
+        bot($masterToken, 'sendMessage', [
+            'chat_id' => $chatId,
+            'text' => "⛔ Bu bo'lim faqat bot administratori uchun ochiq.",
+            'reply_markup' => $mainMenu
+        ]);
+        exit;
+    }
+
     $stats = getAllStats($baseDir);
-    $report = "📊 <b>BOTMOTHER UMUMIY STATISTIKASI</b>\n\n";
+    $report = "📊 <b>BOTMOTHER STATISTIKASI (ADMIN)</b>\n\n";
     $report .= "👥 Jami foydalanuvchilar: <b>{$stats['total_users']} ta</b>\n";
-    $report .= "🟢 Hozir faol (ichkarida): <b>{$stats['active_users']} ta</b>\n";
-    $report .= "🔴 Chiqib ketgan (Block): <b>{$stats['left_users']} ta</b>\n";
-    $report .= "🔄 Jami kirish-chiqishlar: <b>{$stats['total_visits']} marta</b>\n";
+    $report .= "🟢 Faol: <b>{$stats['active_users']} ta</b>\n";
+    $report .= "🔴 Chiqib ketgan: <b>{$stats['left_users']} ta</b>\n";
+    $report .= "🔄 Jami kirishlar: <b>{$stats['total_visits']} marta</b>\n";
     $report .= "🤖 Yaratilgan botlar: <b>{$stats['total_bots']} ta</b>\n\n";
-    $report .= "📋 <b>Foydalanuvchilar ro'yxati (ID va faollik):</b>\n";
 
     $limit = 0;
     foreach ($stats['users'] as $idx => $u) {
-        if ($limit >= 30) {
-            $report .= "\n<i>...va yana " . ($stats['total_users'] - 30) . " ta foydalanuvchi (to'liq ro'yxat sayt havolasida).</i>";
+        if ($limit >= 25) {
+            $report .= "\n<i>...va yana " . ($stats['total_users'] - 25) . " ta foydalanuvchi.</i>";
             break;
         }
         $n = $idx + 1;
@@ -561,7 +541,7 @@ if ($text === '📊 Statistika' || $text === '/stats') {
         $uNameStr = !empty($u['username']) ? " (@{$u['username']})" : "";
         $vCount = $u['visits_count'] ?? 1;
         $bCount = count($u['bots'] ?? []);
-        $report .= "{$n}. {$statusIcon} <b>{$u['first_name']}</b>{$uNameStr}\n   🆔 ID: <code>{$u['id']}</code> | 🔄 {$vCount} marta | 🤖 {$bCount} bot\n";
+        $report .= "{$n}. {$statusIcon} <b>{$u['first_name']}</b>{$uNameStr}\n   🆔 <code>{$u['id']}</code> | 🔄 {$vCount} | 🤖 {$bCount}\n";
         $limit++;
     }
 
@@ -569,12 +549,111 @@ if ($text === '📊 Statistika' || $text === '/stats') {
         'chat_id' => $chatId,
         'text' => $report,
         'parse_mode' => 'HTML',
-        'reply_markup' => $mainMenu
+        'reply_markup' => $adminPanelMenu
     ]);
     exit;
 }
 
-// Mening botlarim bo'limi
+// FAQAT ADMIN UCHUN ADMIN PANEL
+if ($text === '🛠 Admin Panel' || $text === '/admin') {
+    if (!$isAdmin) {
+        bot($masterToken, 'sendMessage', [
+            'chat_id' => $chatId,
+            'text' => "⛔ Sizda admin huquqi mavjud emas.",
+            'reply_markup' => $mainMenu
+        ]);
+        exit;
+    }
+
+    $stats = getAllStats($baseDir);
+    bot($masterToken, 'sendMessage', [
+        'chat_id' => $chatId,
+        'text' => "🛠 <b>ADMIN PANEL</b>\n\n👤 Foydalanuvchilar: <b>{$stats['total_users']}</b>\n🤖 Botlar: <b>{$stats['total_bots']}</b>\n\nKerakli amalni tanlang:",
+        'parse_mode' => 'HTML',
+        'reply_markup' => $adminPanelMenu
+    ]);
+    exit;
+}
+
+if ($isAdmin && $text === '📢 Xabar yuborish') {
+    $userData['step'] = 'admin_broadcast';
+    file_put_contents($userFile, json_encode($userData, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+    bot($masterToken, 'sendMessage', [
+        'chat_id' => $chatId,
+        'text' => "✍️ Barcha faol foydalanuvchilarga yuboriladigan xabar matnini yozing:",
+        'reply_markup' => $cancelMenu
+    ]);
+    exit;
+}
+
+if ($isAdmin && ($userData['step'] ?? '') === 'admin_broadcast' && $text !== '') {
+    $stats = getAllStats($baseDir);
+    $sentCount = 0;
+    foreach ($stats['users'] as $u) {
+        if (($u['status'] ?? 'active') !== 'left' && !empty($u['id'])) {
+            $res = bot($masterToken, 'sendMessage', [
+                'chat_id' => $u['id'],
+                'text' => "📢 <b>Admin xabari:</b>\n\n{$text}",
+                'parse_mode' => 'HTML'
+            ]);
+            if ($res['ok'] ?? false) $sentCount++;
+        }
+    }
+    $userData['step'] = 'menu';
+    file_put_contents($userFile, json_encode($userData, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+    bot($masterToken, 'sendMessage', [
+        'chat_id' => $chatId,
+        'text' => "✅ Xabar <b>{$sentCount} ta</b> foydalanuvchiga yuborildi!",
+        'parse_mode' => 'HTML',
+        'reply_markup' => $adminPanelMenu
+    ]);
+    exit;
+}
+
+if ($isAdmin && $text === '🔍 User ID qidirish') {
+    $userData['step'] = 'admin_find_user';
+    file_put_contents($userFile, json_encode($userData, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+    bot($masterToken, 'sendMessage', [
+        'chat_id' => $chatId,
+        'text' => "🆔 Tekshiriladigan foydalanuvchining Telegram ID'sini yuboring:",
+        'reply_markup' => $cancelMenu
+    ]);
+    exit;
+}
+
+if ($isAdmin && ($userData['step'] ?? '') === 'admin_find_user' && $text !== '') {
+    $targetId = preg_replace('/[^0-9]/', '', $text);
+    $targetFile = "$baseDir/users/{$targetId}/profile.json";
+    $userData['step'] = 'menu';
+    file_put_contents($userFile, json_encode($userData, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+
+    if ($targetId && file_exists($targetFile)) {
+        $tu = json_decode(file_get_contents($targetFile), true);
+        $info = "👤 <b>Foydalanuvchi ma'lumoti:</b>\n\n";
+        $info .= "🆔 ID: <code>{$tu['id']}</code>\n";
+        $info .= "Ism: <b>" . htmlspecialchars($tu['first_name'] ?? '') . "</b>\n";
+        $info .= "Username: " . (!empty($tu['username']) ? "@" . htmlspecialchars($tu['username']) : "yo'q") . "\n";
+        $info .= "Holati: " . (($tu['status'] ?? 'active') === 'left' ? "🔴 Chiqib ketgan" : "🟢 Faol") . "\n";
+        $info .= "Kirishlar: <b>" . ($tu['visits_count'] ?? 1) . "</b>\n";
+        $info .= "Botlari soni: <b>" . count($tu['bots'] ?? []) . "</b>\n";
+        $info .= "Oxirgi faollik: " . ($tu['last_active'] ?? '—');
+        bot($masterToken, 'sendMessage', [
+            'chat_id' => $chatId,
+            'text' => $info,
+            'parse_mode' => 'HTML',
+            'reply_markup' => $adminPanelMenu
+        ]);
+    } else {
+        bot($masterToken, 'sendMessage', [
+            'chat_id' => $chatId,
+            'text' => "❌ Bunday ID bilan foydalanuvchi topilmadi.",
+            'reply_markup' => $adminPanelMenu
+        ]);
+    }
+    exit;
+}
+
+// Mening botlarim
 if ($text === '🤖 Mening botlarim') {
     if (empty($userData['bots'])) {
         bot($masterToken, 'sendMessage', [
@@ -612,15 +691,15 @@ if (isset($botTypes[$text])) {
 
     bot($masterToken, 'sendMessage', [
         'chat_id' => $chatId,
-        'text' => "✅ <b>{$botTypes[$text]['name']}</b> tanlandi!\n\nEndi @BotFather dan olgan <b>Bot Tokenni</b> shu yerga yuboring:\n<i>(Masalan: 123456789:AAHdqTcvCH1vGWJxfSeof...)</i>",
+        'text' => "✅ <b>{$botTypes[$text]['name']}</b> tanlandi!\n\nEndi @BotFather dan olgan <b>Bot Tokenni</b> shu yerga yuboring:",
         'parse_mode' => 'HTML',
         'reply_markup' => $cancelMenu
     ]);
     exit;
 }
 
-// Token qabul qilish va avtomatik Webhook o'rnatish
-if ($userData['step'] === 'wait_token') {
+// Token qabul qilish va webhook o'rnatish
+if (($userData['step'] ?? '') === 'wait_token') {
     $newToken = $text;
 
     if (!preg_match('/^[0-9]+:[a-zA-Z0-9_-]+$/', $newToken)) {
