@@ -1,6 +1,6 @@
 <?php
 /**
- * BOTMOTHER - Konstruktor Bot + Admin Panel + Faqat Admin Statistika
+ * BOTMOTHER - Konstruktor Bot + Admin Panel + Faqat Admin Statistika + Tashqi API & Cookie
  */
 
 date_default_timezone_set('Asia/Tashkent');
@@ -35,7 +35,7 @@ function sendTg($token, $method, $data) {
     $ch = curl_init("https://api.telegram.org/bot{$token}/{$method}");
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 60);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 90);
     $res = curl_exec($ch);
     curl_close($ch);
     return json_decode($res, true);
@@ -49,40 +49,76 @@ function extractLastError($raw) {
             return mb_substr($line, 0, 220);
         }
     }
-    return "Server IP cheklovi yoki havola yopiq";
+    return "Instagram yuklashda xatolik";
 }
 
-function fetchIgFallbackUrl($url) {
-    $endpoints = [
-        'https://api.cobalt.tools/api/json',
-    ];
-    foreach ($endpoints as $ep) {
-        $ch = curl_init($ep);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 20);
-        curl_setopt($ch, CURLOPT_HTTPHEADER, [
-            'Content-Type: application/json',
-            'Accept: application/json',
-            'User-Agent: Mozilla/5.0'
-        ]);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode([
-            'url' => $url,
-            'videoQuality' => '720'
-        ]));
-        $res = curl_exec($ch);
-        curl_close($ch);
-        if ($res) {
-            $json = json_decode($res, true);
-            if (!empty($json['url']) && filter_var($json['url'], FILTER_VALIDATE_URL)) {
-                return $json['url'];
-            }
-            if (!empty($json['picker'][0]['url']) && filter_var($json['picker'][0]['url'], FILTER_VALIDATE_URL)) {
-                return $json['picker'][0]['url'];
-            }
+function extractUrlFromMixedText($raw) {
+    foreach (preg_split('/\r\n|\r|\n/', trim((string)$raw)) as $line) {
+        $line = trim($line);
+        if (filter_var($line, FILTER_VALIDATE_URL)) {
+            return $line;
         }
     }
     return '';
+}
+
+function fetchFromExternalApi($apiUrl, $mediaUrl) {
+    if (empty($apiUrl)) return '';
+    $apiKey = getenv('MEDIA_API_KEY') ?: '';
+    $headers = [
+        'Content-Type: application/json',
+        'Accept: application/json',
+        'User-Agent: BotmotherClient/1.0'
+    ];
+    if ($apiKey !== '') {
+        $headers[] = 'Authorization: Bearer ' . $apiKey;
+        $headers[] = 'X-API-Key: ' . $apiKey;
+    }
+
+    $ch = curl_init($apiUrl);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 35);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['url' => $mediaUrl]));
+    $res = curl_exec($ch);
+    curl_close($ch);
+
+    if (!$res) return '';
+    $json = json_decode($res, true);
+    if (!is_array($json)) return '';
+
+    foreach (['video_url', 'url', 'download_url'] as $k) {
+        if (!empty($json[$k]) && filter_var($json[$k], FILTER_VALIDATE_URL)) {
+            return $json[$k];
+        }
+    }
+    if (!empty($json['data']['url']) && filter_var($json['data']['url'], FILTER_VALIDATE_URL)) {
+        return $json['data']['url'];
+    }
+    if (!empty($json['data']['video_url']) && filter_var($json['data']['video_url'], FILTER_VALIDATE_URL)) {
+        return $json['data']['video_url'];
+    }
+    return '';
+}
+
+function runYtDlpCommand($baseCmd, $cookieOpt, $safeUrl) {
+    $cmds = [];
+    if ($cookieOpt !== '') {
+        $cmds[] = str_replace('{COOKIE}', $cookieOpt, $baseCmd) . " {$safeUrl} 2>&1";
+    }
+    $cmds[] = str_replace('{COOKIE}', '', $baseCmd) . " {$safeUrl} 2>&1";
+
+    $lastOut = '';
+    foreach ($cmds as $cmd) {
+        $out = trim((string)shell_exec($cmd));
+        $lastOut = $out;
+        $foundUrl = extractUrlFromMixedText($out);
+        if ($foundUrl !== '') {
+            return ['url' => $foundUrl, 'raw' => $out];
+        }
+    }
+    return ['url' => '', 'raw' => $lastOut];
 }
 
 if ($text === '/start') {
@@ -95,28 +131,22 @@ if ($text === '/start') {
     $startTime = microtime(true);
     sendTg($token, 'sendChatAction', ['chat_id' => $chatId, 'action' => 'upload_video']);
 
-    $safeUrl = escapeshellarg($text);
-    $cmds = [
-        "yt-dlp --no-warnings --no-playlist --user-agent 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1' -f 'best[ext=mp4]/best' -g {$safeUrl} 2>&1",
-        "yt-dlp --no-warnings --no-playlist -f 'best[ext=mp4]/best' -g {$safeUrl} 2>&1"
-    ];
+    $apiUrl = getenv('IG_API_URL') ?: '';
+    $videoUrl = fetchFromExternalApi($apiUrl, $text);
+    $rawOut = '';
 
-    $videoUrl = '';
-    $lastOut = '';
-    foreach ($cmds as $cmd) {
-        $out = trim((string)shell_exec($cmd));
-        $lastOut = $out;
-        foreach (preg_split('/\r\n|\r|\n/', $out) as $line) {
-            $line = trim($line);
-            if (filter_var($line, FILTER_VALIDATE_URL)) {
-                $videoUrl = $line;
-                break 2;
-            }
-        }
-    }
+    $cookieFile = '/etc/secrets/ig_cookies.txt';
+    $cookieOpt = file_exists($cookieFile) ? " --cookies " . escapeshellarg($cookieFile) : "";
+    $safeUrl = escapeshellarg($text);
 
     if (empty($videoUrl)) {
-        $videoUrl = fetchIgFallbackUrl($text);
+        $resGet = runYtDlpCommand(
+            "yt-dlp --no-warnings --no-playlist{COOKIE} -f 'best[ext=mp4]/best' -g",
+            $cookieOpt,
+            $safeUrl
+        );
+        $videoUrl = $resGet['url'];
+        $rawOut = $resGet['raw'];
     }
 
     $sent = false;
@@ -133,20 +163,34 @@ if ($text === '/start') {
 
     if (!$sent) {
         $tmpFile = sys_get_temp_dir() . '/ig_' . uniqid() . '.mp4';
-        $dlOut = trim((string)shell_exec("yt-dlp --no-warnings --no-playlist --user-agent 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)' -f 'best[ext=mp4]/best' -o " . escapeshellarg($tmpFile) . " {$safeUrl} 2>&1"));
-        if (file_exists($tmpFile) && filesize($tmpFile) > 0) {
-            $elapsed = round(microtime(true) - $startTime, 2);
-            $res = sendTg($token, 'sendVideo', [
-                'chat_id' => $chatId,
-                'video' => new CURLFile($tmpFile),
-                'caption' => "⚡ <b>{$elapsed} soniyada</b> yuklandi!",
-                'parse_mode' => 'HTML'
-            ]);
-            @unlink($tmpFile);
-            if ($res['ok'] ?? false) $sent = true;
+        $dlOut = '';
+        $tryCmds = [];
+        if ($cookieOpt !== '') {
+            $tryCmds[] = "yt-dlp --no-warnings --no-playlist{$cookieOpt} -f 'best[ext=mp4]/best' -o " . escapeshellarg($tmpFile) . " {$safeUrl} 2>&1";
         }
+        $tryCmds[] = "yt-dlp --no-warnings --no-playlist -f 'best[ext=mp4]/best' -o " . escapeshellarg($tmpFile) . " {$safeUrl} 2>&1";
+
+        foreach ($tryCmds as $cmd) {
+            $dlOut = trim((string)shell_exec($cmd));
+            if (file_exists($tmpFile) && filesize($tmpFile) > 0) {
+                $elapsed = round(microtime(true) - $startTime, 2);
+                $res = sendTg($token, 'sendVideo', [
+                    'chat_id' => $chatId,
+                    'video' => new CURLFile($tmpFile),
+                    'caption' => "⚡ <b>{$elapsed} soniyada</b> yuklandi!",
+                    'parse_mode' => 'HTML'
+                ]);
+                @unlink($tmpFile);
+                if ($res['ok'] ?? false) {
+                    $sent = true;
+                    break;
+                }
+            }
+        }
+        @unlink($tmpFile);
+
         if (!$sent) {
-            $errMsg = extractLastError($dlOut ?: $lastOut);
+            $errMsg = extractLastError($dlOut ?: $rawOut);
             sendTg($token, 'sendMessage', [
                 'chat_id' => $chatId,
                 'text' => "❌ Instagram videoni yuklab bo'lmadi.\nSabab: <code>" . htmlspecialchars($errMsg) . "</code>",
@@ -181,7 +225,7 @@ function sendTg($token, $method, $data) {
     $ch = curl_init("https://api.telegram.org/bot{$token}/{$method}");
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 60);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 90);
     $res = curl_exec($ch);
     curl_close($ch);
     return json_decode($res, true);
@@ -195,30 +239,55 @@ function extractLastError($raw) {
             return mb_substr($line, 0, 220);
         }
     }
-    return "YouTube server IP so'rovini blokladi";
+    return "YouTube yuklashda xatolik";
 }
 
-function fetchYtFallbackUrl($url) {
-    $ch = curl_init('https://api.cobalt.tools/api/json');
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 20);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+function extractUrlFromMixedText($raw) {
+    foreach (preg_split('/\r\n|\r|\n/', trim((string)$raw)) as $line) {
+        $line = trim($line);
+        if (filter_var($line, FILTER_VALIDATE_URL)) {
+            return $line;
+        }
+    }
+    return '';
+}
+
+function fetchFromExternalApi($apiUrl, $mediaUrl) {
+    if (empty($apiUrl)) return '';
+    $apiKey = getenv('MEDIA_API_KEY') ?: '';
+    $headers = [
         'Content-Type: application/json',
         'Accept: application/json',
-        'User-Agent: Mozilla/5.0'
-    ]);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode([
-        'url' => $url,
-        'videoQuality' => '720'
-    ]));
+        'User-Agent: BotmotherClient/1.0'
+    ];
+    if ($apiKey !== '') {
+        $headers[] = 'Authorization: Bearer ' . $apiKey;
+        $headers[] = 'X-API-Key: ' . $apiKey;
+    }
+
+    $ch = curl_init($apiUrl);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 35);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['url' => $mediaUrl]));
     $res = curl_exec($ch);
     curl_close($ch);
-    if ($res) {
-        $json = json_decode($res, true);
-        if (!empty($json['url']) && filter_var($json['url'], FILTER_VALIDATE_URL)) {
-            return $json['url'];
+
+    if (!$res) return '';
+    $json = json_decode($res, true);
+    if (!is_array($json)) return '';
+
+    foreach (['video_url', 'url', 'download_url'] as $k) {
+        if (!empty($json[$k]) && filter_var($json[$k], FILTER_VALIDATE_URL)) {
+            return $json[$k];
         }
+    }
+    if (!empty($json['data']['url']) && filter_var($json['data']['url'], FILTER_VALIDATE_URL)) {
+        return $json['data']['url'];
+    }
+    if (!empty($json['data']['video_url']) && filter_var($json['data']['video_url'], FILTER_VALIDATE_URL)) {
+        return $json['data']['video_url'];
     }
     return '';
 }
@@ -233,31 +302,30 @@ if ($text === '/start') {
     $startTime = microtime(true);
     sendTg($token, 'sendChatAction', ['chat_id' => $chatId, 'action' => 'upload_video']);
 
-    $safeUrl = escapeshellarg($text);
-    $clients = [
-        "youtube:player_client=tv_embedded",
-        "youtube:player_client=android",
-        "youtube:player_client=web_safari",
-        "youtube:player_client=mweb"
-    ];
+    $apiUrl = getenv('YT_API_URL') ?: '';
+    $videoUrl = fetchFromExternalApi($apiUrl, $text);
+    $rawOut = '';
 
-    $videoUrl = '';
-    $lastOut = '';
-    foreach ($clients as $clientArg) {
-        $cmd = "yt-dlp --no-warnings --no-playlist --extractor-args " . escapeshellarg($clientArg) . " -f 'best[ext=mp4][acodec!=none][vcodec!=none]/best[ext=mp4]/18/best' -g {$safeUrl} 2>&1";
-        $out = trim((string)shell_exec($cmd));
-        $lastOut = $out;
-        foreach (preg_split('/\r\n|\r|\n/', $out) as $line) {
-            $line = trim($line);
-            if (filter_var($line, FILTER_VALIDATE_URL)) {
-                $videoUrl = $line;
-                break 2;
-            }
-        }
-    }
+    $cookieFile = '/etc/secrets/yt_cookies.txt';
+    $cookieOpt = file_exists($cookieFile) ? " --cookies " . escapeshellarg($cookieFile) : "";
+    $safeUrl = escapeshellarg($text);
 
     if (empty($videoUrl)) {
-        $videoUrl = fetchYtFallbackUrl($text);
+        $candidates = [];
+        if ($cookieOpt !== '') {
+            $candidates[] = "yt-dlp --no-warnings --no-playlist{$cookieOpt} -f 'best[ext=mp4][acodec!=none][vcodec!=none]/best[ext=mp4]/18/best' -g {$safeUrl} 2>&1";
+            $candidates[] = "yt-dlp --no-warnings --no-playlist{$cookieOpt} --extractor-args 'youtube:player_client=android,web' -f 'best[ext=mp4]/18/best' -g {$safeUrl} 2>&1";
+        }
+        $candidates[] = "yt-dlp --no-warnings --no-playlist -f 'best[ext=mp4][acodec!=none][vcodec!=none]/best[ext=mp4]/18/best' -g {$safeUrl} 2>&1";
+
+        foreach ($candidates as $cmd) {
+            $rawOut = trim((string)shell_exec($cmd));
+            $found = extractUrlFromMixedText($rawOut);
+            if ($found !== '') {
+                $videoUrl = $found;
+                break;
+            }
+        }
     }
 
     $sent = false;
@@ -275,25 +343,33 @@ if ($text === '/start') {
     if (!$sent) {
         $tmpFile = sys_get_temp_dir() . '/yt_' . uniqid() . '.mp4';
         $dlOut = '';
-        foreach ($clients as $clientArg) {
-            $dlOut = trim((string)shell_exec("yt-dlp --no-warnings --no-playlist --extractor-args " . escapeshellarg($clientArg) . " -f 'best[ext=mp4][filesize<48M]/18' -o " . escapeshellarg($tmpFile) . " {$safeUrl} 2>&1"));
+        $dlCmds = [];
+        if ($cookieOpt !== '') {
+            $dlCmds[] = "yt-dlp --no-warnings --no-playlist{$cookieOpt} -f 'best[ext=mp4][filesize<48M]/18' -o " . escapeshellarg($tmpFile) . " {$safeUrl} 2>&1";
+        }
+        $dlCmds[] = "yt-dlp --no-warnings --no-playlist -f 'best[ext=mp4][filesize<48M]/18' -o " . escapeshellarg($tmpFile) . " {$safeUrl} 2>&1";
+
+        foreach ($dlCmds as $cmd) {
+            $dlOut = trim((string)shell_exec($cmd));
             if (file_exists($tmpFile) && filesize($tmpFile) > 0) {
-                break;
+                $elapsed = round(microtime(true) - $startTime, 2);
+                $res = sendTg($token, 'sendVideo', [
+                    'chat_id' => $chatId,
+                    'video' => new CURLFile($tmpFile),
+                    'caption' => "⚡ <b>{$elapsed} soniyada</b> yuklandi!",
+                    'parse_mode' => 'HTML'
+                ]);
+                @unlink($tmpFile);
+                if ($res['ok'] ?? false) {
+                    $sent = true;
+                    break;
+                }
             }
         }
-        if (file_exists($tmpFile) && filesize($tmpFile) > 0) {
-            $elapsed = round(microtime(true) - $startTime, 2);
-            $res = sendTg($token, 'sendVideo', [
-                'chat_id' => $chatId,
-                'video' => new CURLFile($tmpFile),
-                'caption' => "⚡ <b>{$elapsed} soniyada</b> yuklandi!",
-                'parse_mode' => 'HTML'
-            ]);
-            @unlink($tmpFile);
-            if ($res['ok'] ?? false) $sent = true;
-        }
+        @unlink($tmpFile);
+
         if (!$sent) {
-            $errMsg = extractLastError($dlOut ?: $lastOut);
+            $errMsg = extractLastError($dlOut ?: $rawOut);
             sendTg($token, 'sendMessage', [
                 'chat_id' => $chatId,
                 'text' => "❌ YouTube videoni yuklab bo'lmadi.\nSabab: <code>" . htmlspecialchars($errMsg) . "</code>",
